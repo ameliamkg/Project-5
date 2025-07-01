@@ -39,9 +39,6 @@ struct block_rwoffset_ops  rwoffset_request;
 
 extern struct block_device *bdevice;
 
-bool kmod_ioctl_init(void);
-void kmod_ioctl_teardown(void);
-
 static int do_bio_rw(void *buffer, unsigned int size,
                      sector_t sector_start, bool write)
 {
@@ -49,10 +46,11 @@ static int do_bio_rw(void *buffer, unsigned int size,
     int ret, total = 0;
 
     while (offset < size) {
-        unsigned int chunk = min(size - offset, (unsigned int)512);
+        unsigned int chunk = min(size - offset, 512u);
         sector_t sector = sector_start + offset / 512;
         struct page *page = vmalloc_to_page(buffer + offset);
         unsigned int page_offset = offset & (PAGE_SIZE - 1);
+
         struct bio *bio = bio_alloc(bdevice, GFP_KERNEL, 1);
         if (!bio)
             return -ENOMEM;
