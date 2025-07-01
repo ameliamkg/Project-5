@@ -39,11 +39,18 @@ long rw_usb(char* data, unsigned int size, unsigned int  offset, bool flag);
 
 static bool open_usb(void)
 {
-    /* Open a block device for the path of the usb */
-    bdevice = blkdev_get_by_path(device, FMODE_READ | FMODE_WRITE, NULL);
+    /* Lookup the block device for the path */
+    bdevice = lookup_bdev(device);
     if (IS_ERR(bdevice)) {
-        printk("error: failed to open the device (%s) using blkdev_get_by_path().\n",
-               device);
+        printk("error: failed to lookup the device (%s).\n", device);
+        bdevice = NULL;
+        return false;
+    }
+    
+    /* Open the block device */
+    bdevice = blkdev_get(bdevice, FMODE_READ | FMODE_WRITE, NULL);
+    if (IS_ERR(bdevice)) {
+        printk("error: failed to open the device (%s).\n", device);
         bdevice = NULL;
         return false;
     }
@@ -178,8 +185,8 @@ static void close_usb(void)
     
     // Check if the bdevice is valid
     if (bdevice && !IS_ERR(bdevice)) {
-        // Use blkdev_put() to release the device reference
-        blkdev_put(bdevice, FMODE_READ | FMODE_WRITE);
+        // Use bd_release() to release the device reference
+        bd_release(bdevice);
         bdevice = NULL;
     }
 }
