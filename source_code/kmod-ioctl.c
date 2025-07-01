@@ -39,6 +39,9 @@ struct block_rwoffset_ops  rwoffset_request;
 
 extern struct block_device *bdevice;
 
+bool kmod_ioctl_init(void);
+void kmod_ioctl_teardown(void);
+
 static int do_bio_rw(void *buffer, unsigned int size,
                      sector_t sector_start, bool write)
 {
