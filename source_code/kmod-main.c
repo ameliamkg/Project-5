@@ -39,44 +39,22 @@ long rw_usb(char* data, unsigned int size, unsigned int  offset, bool flag);
 
 static bool open_usb(void)
 {
-    struct block_device *bdev;
-    dev_t dev_id;
-    int mode = FMODE_READ | FMODE_WRITE;
-    
-    /* Lookup the block device for the path */
-    bdev = lookup_bdev(device, &dev_id);
-    if (IS_ERR(bdev)) {
-        printk("error: failed to lookup the device (%s).\n", device);
-        return false;
-    }
-    
-    /* Open the block device using bdget + bd_claim */
-    bdevice = bdget(dev_id);
-    if (!bdevice) {
-        printk("error: failed to get the block device (%s).\n", device);
-        return false;
-    }
-    
-    /* Claim the block device */
-    if (!bd_claim(bdevice, THIS_MODULE)) {
-        printk("error: failed to claim the device (%s).\n", device);
-        bdput(bdevice);
+    /* Open the block device by path */
+    bdevice = bdev_open_by_path(device, FMODE_READ | FMODE_WRITE, NULL);
+    if (IS_ERR(bdevice)) {
+        printk("error: failed to open the device (%s) using bdev_open_by_path().\n",
+               device);
         bdevice = NULL;
         return false;
     }
-    
-    /* Perform various sanity checks to make sure the device works */
-    if (!bdevice) {
-        printk("error: failed to open the device (%s).\n", device);
-        return false;
-    }
+
     printk("success: opened %s as a block device.\n", bdevice->bd_disk->disk_name);
 
+    /* Allocate a reusable bio for subsequent transfers */
     usb_bio = bio_alloc(bdevice, 256, REQ_OP_WRITE, GFP_NOIO);
     if (!usb_bio || IS_ERR(usb_bio)) {
         printk("error: failed to allocate a bio structure.\n");
-        bd_release(bdevice);
-        bdput(bdevice);
+        bdev_release(bdevice);
         bdevice = NULL;
         return false;
     }
@@ -194,12 +172,9 @@ static void close_usb(void)
         bio_put(usb_bio);
         usb_bio = NULL;
     }
-    
-    // Check if the bdevice is valid
+
     if (bdevice && !IS_ERR(bdevice)) {
-        // Release the claim and put the block device
-        bd_release(bdevice);
-        bdput(bdevice);
+        bdev_release(bdevice);
         bdevice = NULL;
     }
 }
