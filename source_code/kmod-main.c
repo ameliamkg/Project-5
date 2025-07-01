@@ -27,7 +27,6 @@ static char *device = "/dev/sdb";
 module_param(device, charp, S_IRUGO);
 
 /* Block device handle and device pointer */
-static struct bdev_handle *bhandle = NULL;
 struct block_device *bdevice = NULL;
 
 bool kmod_ioctl_init(void);
@@ -35,31 +34,36 @@ void kmod_ioctl_teardown(void);
 
 static bool open_usb(void)
 {
-    struct bdev_handle *handle;
+    dev_t devt;
+    int err;
 
-    /* Open the block device at the given path */
-    handle = bdev_open_by_path(device,
-                               BLK_OPEN_READ,
-                               NULL,
-                               &fs_holder_ops);
-    if (IS_ERR(handle)) {
-        pr_err("bdev_open_by_path(%s) failed: %ld\n",
-               device, PTR_ERR(handle));
+    /* Lookup the device number */
+    err = lookup_bdev(device, &devt);
+    if (err) {
+        pr_err("lookup_bdev(%s) failed: %d\n", device, err);
         return false;
     }
-    bhandle = handle;
-    bdevice = handle->bdev;
+
+    /* Get the block_device for I/O */
+    bdevice = blkdev_get_by_dev(devt,
+                                FMODE_READ | FMODE_WRITE,
+                                NULL);
+    if (IS_ERR(bdevice)) {
+        pr_err("blkdev_get_by_dev(%s) failed: %ld\n",
+               device, PTR_ERR(bdevice));
+        bdevice = NULL;
+        return false;
+    }
+
     pr_info("Opened block device %s successfully\n", device);
     return true;
 }
 
 static void close_usb(void)
 {
-    if (bhandle) {
-        /* Release the block device handle */
-        bdev_release(bhandle);
+    if (bdevice) {
+        blkdev_put(bdevice, NULL);
         pr_info("Closed block device %s\n", device);
-        bhandle = NULL;
         bdevice = NULL;
     }
 }
