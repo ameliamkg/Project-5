@@ -28,7 +28,7 @@ module_param(device, charp, S_IRUGO);
 
 /* Block device handle and device pointer */
 static struct bdev_handle *bhandle = NULL;
-static struct block_device *bdevice = NULL;
+struct block_device *bdevice = NULL;
 
 bool kmod_ioctl_init(void);
 void kmod_ioctl_teardown(void);
