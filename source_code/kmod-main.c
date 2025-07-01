@@ -23,7 +23,7 @@ MODULE_DESCRIPTION("A Block Abstraction Read/Write for a USB device.");
 MODULE_VERSION("1.0");
 
 /* USB device name argument */
-static char *device = "/dev/sdb";
+static char *device = "/dev/sda";
 module_param(device, charp, S_IRUGO);
 
 /* Block device handle and device pointer */
