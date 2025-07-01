@@ -23,7 +23,7 @@ MODULE_DESCRIPTION("A Block Abstraction Read/Write for a USB device.");
 MODULE_VERSION("1.0");
 
 /* USB device name argument */
-char* device = "/dev/sdb";
+char* device = "/dev/sda";
 module_param(device, charp, S_IRUGO);
 
 
@@ -31,7 +31,6 @@ module_param(device, charp, S_IRUGO);
 unsigned int cur_dev_sector = 0;
 static struct block_device *bdevice = NULL;
 static struct bio *usb_bio = NULL;
-static struct file *usb_file = NULL;
 
 
 bool kmod_ioctl_init(void);
@@ -40,19 +39,18 @@ long rw_usb(char* data, unsigned int size, unsigned int  offset, bool flag);
 
 static bool open_usb(void)
 {
-    /* Open a file for the path of the usb */
-    usb_file = bdev_file_open_by_path(device, BLK_OPEN_READ | BLK_OPEN_WRITE, NULL, NULL);
-    if (IS_ERR(usb_file)) {
-        printk("error: failed to open the device (%s) using bdev_file_open_by_path().\n",
+    /* Open a block device for the path of the usb */
+    bdevice = blkdev_get_by_path(device, FMODE_READ | FMODE_WRITE, NULL);
+    if (IS_ERR(bdevice)) {
+        printk("error: failed to open the device (%s) using blkdev_get_by_path().\n",
                device);
-        usb_file = NULL;
+        bdevice = NULL;
         return false;
     }
-    bdevice = file_bdev(usb_file);
     
     /* Perform various sanity checks to make sure the device works */
-    if (IS_ERR(bdevice) || !bdevice) {
-        printk("error: failed to open the device (%s) using lookup_bdev().\n", device);
+    if (!bdevice) {
+        printk("error: failed to open the device (%s).\n", device);
         return false;
     }
     printk("success: opened %s as a block device.\n", bdevice->bd_disk->disk_name);
@@ -60,7 +58,7 @@ static bool open_usb(void)
     usb_bio = bio_alloc(bdevice, 256, REQ_OP_WRITE, GFP_NOIO);
     if (!usb_bio || IS_ERR(usb_bio)) {
         printk("error: failed to allocate a bio structure.\n");
-        fput(usb_file);
+        blkdev_put(bdevice, FMODE_READ | FMODE_WRITE);
         return false;
     }
     printk("success: allocated usb_bio.\n");
@@ -171,21 +169,19 @@ long rw_usb(
 
 static void close_usb(void)
 {
-    /* Close the file and device communication interface */
+    /* Close the block device communication interface */
 
-    // Check if the usb_file is valid
-    if (usb_file && !IS_ERR(usb_file)) {
-        // Use bdev_fput() to release the file reference
-        bdev_fput(usb_file);
-        usb_file = NULL;
-    }
-    
     if (usb_bio) {
         bio_put(usb_bio);
         usb_bio = NULL;
     }
     
-    bdevice = NULL;
+    // Check if the bdevice is valid
+    if (bdevice && !IS_ERR(bdevice)) {
+        // Use blkdev_put() to release the device reference
+        blkdev_put(bdevice, FMODE_READ | FMODE_WRITE);
+        bdevice = NULL;
+    }
 }
 
 static int __init kmod_init(void)
