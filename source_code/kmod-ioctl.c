@@ -1,4 +1,5 @@
 #include <linux/blkdev.h>
+#include <linux/bio.h>
 #include <linux/completion.h>
 #include <linux/dcache.h>
 #include <linux/delay.h>
@@ -27,14 +28,12 @@
 #include "../ioctl-defines.h"
 
 #include <linux/vmalloc.h>
-#include <linux/mm.h>    // For PAGE_SIZE
+#include <linux/mm.h>
 
-/* Device-related definitions */
 static dev_t            dev = 0;
 static struct class*    kmod_class;
 static struct cdev      kmod_cdev;
 
-/* Buffers for different operation requests */
 struct block_rw_ops rw_request;
 struct block_rwoffset_ops rwoffset_request;
 
@@ -43,9 +42,6 @@ extern struct block_device *bdevice;
 bool kmod_ioctl_init(void);
 void kmod_ioctl_teardown(void);
 
-/**
- * Perform block I/O in 512-byte chunks and return total bytes read/written.
- */
 static int do_bio_rw(void *buffer, unsigned int size,
                      sector_t sector_start, bool write)
 {
@@ -58,7 +54,7 @@ static int do_bio_rw(void *buffer, unsigned int size,
         sector_t sector = sector_start + offset / 512;
         struct page *page = vmalloc_to_page(buffer + offset);
         unsigned int page_offset = offset & (PAGE_SIZE - 1);
-        /* Allocate a bio for this chunk */
+
         struct bio *bio = bio_alloc(bdevice, GFP_KERNEL, 1);
         if (!bio)
             return -ENOMEM;
@@ -94,24 +90,19 @@ static long kmod_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
         case BWRITE:
         {
             sector_t sector = f->f_pos >> 9;
-            /* Get request from user */
             if (copy_from_user(&rw_request, (void __user *)arg, sizeof(rw_request)))
                 return -EFAULT;
-            /* Allocate a kernel buffer */
             kernbuf = vmalloc(rw_request.size);
             if (!kernbuf)
                 return -ENOMEM;
             if (cmd == BWRITE) {
-                /* Copy data from user into kernel buffer */
                 if (copy_from_user(kernbuf, rw_request.data, rw_request.size)) {
                     vfree(kernbuf);
                     return -EFAULT;
                 }
             }
-            /* Perform the block operation */
             ret = do_bio_rw(kernbuf, rw_request.size, sector, (cmd == BWRITE));
             if (ret >= 0 && cmd == BREAD) {
-                /* Copy data back to user */
                 if (copy_to_user(rw_request.data, kernbuf, ret))
                     ret = -EFAULT;
             }
@@ -124,7 +115,6 @@ static long kmod_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
         case BREADOFFSET:
         case BWRITEOFFSET:
         {
-            /* Get request from user */
             if (copy_from_user(&rwoffset_request, (void __user *)arg, sizeof(rwoffset_request)))
                 return -EFAULT;
             kernbuf = vmalloc(rwoffset_request.size);
@@ -136,7 +126,6 @@ static long kmod_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
                     return -EFAULT;
                 }
             }
-            /* Perform the block operation */
             ret = do_bio_rw(kernbuf, rwoffset_request.size,
                             (sector_t)(rwoffset_request.offset >> 9),
                             (cmd == BWRITEOFFSET));
@@ -174,13 +163,10 @@ static struct file_operations fops = {
 };
 
 bool kmod_ioctl_init(void) {
-    if (alloc_chrdev_region(&dev, 0, 1, "usbaccess") < 0) {
-        printk("error: couldn't allocate 'usbaccess' character device.\n");
+    if (alloc_chrdev_region(&dev, 0, 1, "usbaccess") < 0)
         return false;
-    }
     cdev_init(&kmod_cdev, &fops);
     if (cdev_add(&kmod_cdev, dev, 1) < 0) {
-        printk("error: couldn't add kmod_cdev.\n");
         unregister_chrdev_region(dev,1);
         return false;
     }
@@ -190,19 +176,16 @@ bool kmod_ioctl_init(void) {
     kmod_class = class_create("kmod_class");
 #endif
     if (IS_ERR(kmod_class)) {
-        printk("error: couldn't create kmod_class.\n");
         cdev_del(&kmod_cdev);
         unregister_chrdev_region(dev,1);
         return false;
     }
     if (device_create(kmod_class, NULL, dev, NULL, "kmod") == NULL) {
-        printk("error: couldn't create device.\n");
         class_destroy(kmod_class);
         cdev_del(&kmod_cdev);
         unregister_chrdev_region(dev,1);
         return false;
     }
-    printk("[*] IOCTL device initialization complete.\n");
     return true;
 }
 
@@ -211,5 +194,4 @@ void kmod_ioctl_teardown(void) {
     class_destroy(kmod_class);
     cdev_del(&kmod_cdev);
     unregister_chrdev_region(dev,1);
-    printk("[*] IOCTL device teardown complete.\n");
 }
