@@ -51,13 +51,12 @@ static int do_bio_rw(void *buffer, unsigned int size,
         struct page *page = vmalloc_to_page(buffer + offset);
         unsigned int page_offset = offset & (PAGE_SIZE - 1);
 
-        struct bio *bio = bio_alloc(bdevice, GFP_KERNEL, 1);
+        struct bio *bio = bio_alloc(bdevice, 1, write ? REQ_OP_WRITE : REQ_OP_READ, GFP_KERNEL);
         if (!bio)
             return -ENOMEM;
 
         bio->bi_iter.bi_sector = sector;
-        bio->bi_bdev = bdevice;
-        bio->bi_opf = write ? REQ_OP_WRITE : REQ_OP_READ;
+        bio->bi_iter.bi_size   = chunk;
 
         if (bio_add_page(bio, page, chunk, page_offset) != chunk) {
             bio_put(bio);
