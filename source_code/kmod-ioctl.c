@@ -26,31 +26,11 @@
 #include <linux/cdev.h>
 #include <linux/nospec.h>
 
-#include <linux/bio.h>
-#include <linux/vmalloc.h>
-
 #include "../ioctl-defines.h"
 
-extern struct block_device *bdevice;
-static int do_bio_rw(void *buffer, unsigned int size, sector_t sector, bool write)
-{
-    struct bio *bio;
-    int ret;
-    bio = bio_alloc(GFP_KERNEL, 1);
-    if (!bio)
-        return -ENOMEM;
-    bio->bi_iter.bi_sector = sector;
-    bio->bi_bdev = bdevice;
-    bio->bi_opf = write ? REQ_OP_WRITE : REQ_OP_READ;
-    if (bio_add_page(bio, vmalloc_to_page(buffer), size, 0) != size) {
-        ret = -EFAULT;
-        goto out;
-    }
-    ret = submit_bio_wait(bio);
-out:
-    bio_put(bio);
-    return ret;
-}
+#include <linux/vmalloc.h>
+#include <linux/bio.h>
+#include <linux/mm.h>    // For PAGE_SIZE
 
 /* Device-related definitions */
 static dev_t            dev = 0;
@@ -64,14 +44,56 @@ struct block_rwoffset_ops rwoffset_request;
 bool kmod_ioctl_init(void);
 void kmod_ioctl_teardown(void);
 
+/**
+ * Perform block I/O in 512-byte chunks and return total bytes read/written.
+ */
+static int do_bio_rw(void *buffer, unsigned int size,
+                     sector_t sector_start, bool write)
+{
+    unsigned int offset = 0;
+    int ret;
+    int total = 0;
+
+    while (offset < size) {
+        unsigned int chunk = min(size - offset, (unsigned int)512);
+        sector_t sector = sector_start + offset / 512;
+        struct page *page = vmalloc_to_page(buffer + offset);
+        unsigned int page_off = offset & (PAGE_SIZE - 1);
+        struct bio *bio = bio_alloc(GFP_KERNEL, 1);
+        if (!bio)
+            return -ENOMEM;
+
+        bio->bi_iter.bi_sector = sector;
+        bio->bi_bdev = bdevice;
+        bio->bi_opf = write ? REQ_OP_WRITE : REQ_OP_READ;
+
+        if (bio_add_page(bio, page, chunk, page_off) != chunk) {
+            bio_put(bio);
+            return -EFAULT;
+        }
+
+        ret = submit_bio_wait(bio);
+        bio_put(bio);
+        if (ret < 0)
+            return ret;
+
+        total += ret;
+        offset += chunk;
+    }
+
+    return total;
+}
+
 static long kmod_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
-    char* kernbuf;
+    char *kernbuf;
+    int ret;
+
     switch (cmd)
     {
         case BREAD:
-        case BWRITE: {
-            long ret;
-            sector_t sector;
+        case BWRITE:
+        {
+            sector_t sector = f->f_pos >> 9;
             /* Get request from user */
             if (copy_from_user(&rw_request, (void __user *)arg, sizeof(rw_request)))
                 return -EFAULT;
@@ -80,28 +102,29 @@ static long kmod_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             if (!kernbuf)
                 return -ENOMEM;
             if (cmd == BWRITE) {
+                /* If writing, copy data from user */
                 if (copy_from_user(kernbuf, rw_request.data, rw_request.size)) {
                     vfree(kernbuf);
                     return -EFAULT;
                 }
             }
             /* Perform the block operation */
-            sector = f->f_pos >> 9;
-            ret = do_bio_rw(kernbuf, rw_request.size, sector, cmd == BWRITE);
-            if (!ret && cmd == BREAD) {
-                if (copy_to_user(rw_request.data, kernbuf, rw_request.size))
+            ret = do_bio_rw(kernbuf, rw_request.size, sector, (cmd == BWRITE));
+            if (ret >= 0 && cmd == BREAD) {
+                /* If reading, copy data back to user */
+                if (copy_to_user(rw_request.data, kernbuf, ret))
                     ret = -EFAULT;
             }
-            if (!ret)
-                f->f_pos += rw_request.size;
+            if (ret >= 0) {
+                f->f_pos += ret;
+            }
             vfree(kernbuf);
             return ret;
         }
 
         case BREADOFFSET:
-        case BWRITEOFFSET: {
-            long ret;
-            sector_t sector;
+        case BWRITEOFFSET:
+        {
             /* Get request from user */
             if (copy_from_user(&rwoffset_request, (void __user *)arg, sizeof(rwoffset_request)))
                 return -EFAULT;
@@ -110,25 +133,32 @@ static long kmod_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
             if (!kernbuf)
                 return -ENOMEM;
             if (cmd == BWRITEOFFSET) {
+                /* If writing, copy data from user */
                 if (copy_from_user(kernbuf, rwoffset_request.data, rwoffset_request.size)) {
                     vfree(kernbuf);
                     return -EFAULT;
                 }
             }
             /* Perform the block operation */
-            sector = rwoffset_request.offset >> 9;
-            ret = do_bio_rw(kernbuf, rwoffset_request.size, sector, cmd == BWRITEOFFSET);
-            if (!ret && cmd == BREADOFFSET) {
-                if (copy_to_user(rwoffset_request.data, kernbuf, rwoffset_request.size))
+            ret = do_bio_rw(kernbuf, rwoffset_request.size,
+                            (sector_t)(rwoffset_request.offset >> 9), (cmd == BWRITEOFFSET));
+            if (ret >= 0 && cmd == BREADOFFSET) {
+                /* If reading, copy data back to user */
+                if (copy_to_user(rwoffset_request.data, kernbuf, ret))
                     ret = -EFAULT;
+            }
+            if (ret >= 0) {
+                f->f_pos = rwoffset_request.offset + ret;
             }
             vfree(kernbuf);
             return ret;
         }
         default: 
             printk("Error: incorrect operation requested, returning.\n");
-            return -1;
+            return -EINVAL;
     }
+
+    return 0;
 }
 
 static int kmod_open(struct inode* inode, struct file* file) {
@@ -154,7 +184,7 @@ bool kmod_ioctl_init(void) {
 
     /* Allocate a character device. */
     if (alloc_chrdev_region(&dev, 0, 1, "usbaccess") < 0) {
-        printk("error: couldn't allocate \'usbaccess\' character device.\n");
+        printk("error: couldn't allocate 'usbaccess' character device.\n");
         return false;
     }
 
@@ -167,15 +197,12 @@ bool kmod_ioctl_init(void) {
 
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(6,2,16)
     if ((kmod_class = class_create(THIS_MODULE, "kmod_class")) == NULL) {
-        printk("error: couldn't create kmod_class.\n");
-        goto cdevfailed;
-    }
 #else
     if ((kmod_class = class_create("kmod_class")) == NULL) {
+#endif
         printk("error: couldn't create kmod_class.\n");
         goto cdevfailed;
     }
-#endif
 
     if ((device_create(kmod_class, NULL, dev, NULL, "kmod")) == NULL) {
         printk("error: couldn't create device.\n");
