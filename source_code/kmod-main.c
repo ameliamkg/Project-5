@@ -39,20 +39,28 @@ long rw_usb(char* data, unsigned int size, unsigned int  offset, bool flag);
 
 static bool open_usb(void)
 {
+    struct block_device *bdev;
     dev_t dev_id;
+    int mode = FMODE_READ | FMODE_WRITE;
     
     /* Lookup the block device for the path */
-    bdevice = lookup_bdev(device, &dev_id);
-    if (IS_ERR(bdevice)) {
+    bdev = lookup_bdev(device, &dev_id);
+    if (IS_ERR(bdev)) {
         printk("error: failed to lookup the device (%s).\n", device);
-        bdevice = NULL;
         return false;
     }
     
-    /* Open the block device using open_bdev_exclusive */
-    bdevice = open_bdev_exclusive(device, FMODE_READ | FMODE_WRITE, NULL);
-    if (IS_ERR(bdevice)) {
-        printk("error: failed to open the device (%s).\n", device);
+    /* Open the block device using bdget + bd_claim */
+    bdevice = bdget(dev_id);
+    if (!bdevice) {
+        printk("error: failed to get the block device (%s).\n", device);
+        return false;
+    }
+    
+    /* Claim the block device */
+    if (!bd_claim(bdevice, THIS_MODULE)) {
+        printk("error: failed to claim the device (%s).\n", device);
+        bdput(bdevice);
         bdevice = NULL;
         return false;
     }
@@ -67,7 +75,9 @@ static bool open_usb(void)
     usb_bio = bio_alloc(bdevice, 256, REQ_OP_WRITE, GFP_NOIO);
     if (!usb_bio || IS_ERR(usb_bio)) {
         printk("error: failed to allocate a bio structure.\n");
-        close_bdev_exclusive(bdevice, FMODE_READ | FMODE_WRITE);
+        bd_release(bdevice);
+        bdput(bdevice);
+        bdevice = NULL;
         return false;
     }
     printk("success: allocated usb_bio.\n");
@@ -187,8 +197,9 @@ static void close_usb(void)
     
     // Check if the bdevice is valid
     if (bdevice && !IS_ERR(bdevice)) {
-        // Use close_bdev_exclusive() to release the device reference
-        close_bdev_exclusive(bdevice, FMODE_READ | FMODE_WRITE);
+        // Release the claim and put the block device
+        bd_release(bdevice);
+        bdput(bdevice);
         bdevice = NULL;
     }
 }
