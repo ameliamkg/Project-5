@@ -39,7 +39,7 @@ static bool open_usb(void)
 
     /* Open the block device at the given path */
     handle = bdev_open_by_path(device,
-                               BLK_OPEN_READ | BLK_OPEN_WRITE,
+                               BLK_OPEN_READ,
                                NULL,
                                &fs_holder_ops);
     if (IS_ERR(handle)) {
