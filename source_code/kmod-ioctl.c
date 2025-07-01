@@ -10,6 +10,7 @@
 #include <linux/kref.h>
 #include <linux/kthread.h>
 #include <linux/limits.h>
+#include <linux/mm.h>
 #include <linux/rwsem.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -28,14 +29,13 @@
 #include "../ioctl-defines.h"
 
 #include <linux/vmalloc.h>
-#include <linux/mm.h>
 
 static dev_t            dev = 0;
 static struct class*    kmod_class;
 static struct cdev      kmod_cdev;
 
-struct block_rw_ops rw_request;
-struct block_rwoffset_ops rwoffset_request;
+struct block_rw_ops        rw_request;
+struct block_rwoffset_ops  rwoffset_request;
 
 extern struct block_device *bdevice;
 
@@ -46,21 +46,20 @@ static int do_bio_rw(void *buffer, unsigned int size,
                      sector_t sector_start, bool write)
 {
     unsigned int offset = 0;
-    int ret;
-    int total = 0;
+    int ret, total = 0;
 
     while (offset < size) {
         unsigned int chunk = min(size - offset, (unsigned int)512);
         sector_t sector = sector_start + offset / 512;
         struct page *page = vmalloc_to_page(buffer + offset);
         unsigned int page_offset = offset & (PAGE_SIZE - 1);
-
-        struct bio *bio = bio_alloc(bdevice, 1, write ? REQ_OP_WRITE : REQ_OP_READ, GFP_KERNEL);
+        struct bio *bio = bio_alloc(bdevice, GFP_KERNEL, 1);
         if (!bio)
             return -ENOMEM;
 
         bio->bi_iter.bi_sector = sector;
         bio->bi_bdev = bdevice;
+        bio->bi_opf = write ? REQ_OP_WRITE : REQ_OP_READ;
 
         if (bio_add_page(bio, page, chunk, page_offset) != chunk) {
             bio_put(bio);
@@ -79,94 +78,94 @@ static int do_bio_rw(void *buffer, unsigned int size,
     return total;
 }
 
-static long kmod_ioctl(struct file *f, unsigned int cmd, unsigned long arg) {
+static long kmod_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
+{
     char *kernbuf;
     int ret;
 
-    switch (cmd)
-    {
-        case BREAD:
-        case BWRITE:
-        {
-            sector_t sector = f->f_pos >> 9;
-            if (copy_from_user(&rw_request, (void __user *)arg, sizeof(rw_request)))
+    switch (cmd) {
+    case BREAD:
+    case BWRITE: {
+        sector_t sector = f->f_pos >> 9;
+        if (copy_from_user(&rw_request, (void __user *)arg, sizeof(rw_request)))
+            return -EFAULT;
+        kernbuf = vmalloc(rw_request.size);
+        if (!kernbuf)
+            return -ENOMEM;
+        if (cmd == BWRITE) {
+            if (copy_from_user(kernbuf, rw_request.data, rw_request.size)) {
+                vfree(kernbuf);
                 return -EFAULT;
-            kernbuf = vmalloc(rw_request.size);
-            if (!kernbuf)
-                return -ENOMEM;
-            if (cmd == BWRITE) {
-                if (copy_from_user(kernbuf, rw_request.data, rw_request.size)) {
-                    vfree(kernbuf);
-                    return -EFAULT;
-                }
             }
-            ret = do_bio_rw(kernbuf, rw_request.size, sector, (cmd == BWRITE));
-            if (ret >= 0 && cmd == BREAD) {
-                if (copy_to_user(rw_request.data, kernbuf, ret))
-                    ret = -EFAULT;
-            }
-            if (ret >= 0)
-                f->f_pos += ret;
-            vfree(kernbuf);
-            return ret;
         }
+        ret = do_bio_rw(kernbuf, rw_request.size, sector, cmd == BWRITE);
+        if (ret >= 0 && cmd == BREAD) {
+            if (copy_to_user(rw_request.data, kernbuf, ret))
+                ret = -EFAULT;
+        }
+        if (ret >= 0)
+            f->f_pos += ret;
+        vfree(kernbuf);
+        return ret;
+    }
 
-        case BREADOFFSET:
-        case BWRITEOFFSET:
-        {
-            if (copy_from_user(&rwoffset_request, (void __user *)arg, sizeof(rwoffset_request)))
+    case BREADOFFSET:
+    case BWRITEOFFSET: {
+        if (copy_from_user(&rwoffset_request, (void __user *)arg,
+                           sizeof(rwoffset_request)))
+            return -EFAULT;
+        kernbuf = vmalloc(rwoffset_request.size);
+        if (!kernbuf)
+            return -ENOMEM;
+        if (cmd == BWRITEOFFSET) {
+            if (copy_from_user(kernbuf, rwoffset_request.data,
+                               rwoffset_request.size)) {
+                vfree(kernbuf);
                 return -EFAULT;
-            kernbuf = vmalloc(rwoffset_request.size);
-            if (!kernbuf)
-                return -ENOMEM;
-            if (cmd == BWRITEOFFSET) {
-                if (copy_from_user(kernbuf, rwoffset_request.data, rwoffset_request.size)) {
-                    vfree(kernbuf);
-                    return -EFAULT;
-                }
             }
-            ret = do_bio_rw(kernbuf, rwoffset_request.size,
-                            (sector_t)(rwoffset_request.offset >> 9),
-                            (cmd == BWRITEOFFSET));
-            if (ret >= 0 && cmd == BREADOFFSET) {
-                if (copy_to_user(rwoffset_request.data, kernbuf, ret))
-                    ret = -EFAULT;
-            }
-            if (ret >= 0)
-                f->f_pos = rwoffset_request.offset + ret;
-            vfree(kernbuf);
-            return ret;
         }
+        ret = do_bio_rw(kernbuf, rwoffset_request.size,
+                        (sector_t)(rwoffset_request.offset >> 9),
+                        cmd == BWRITEOFFSET);
+        if (ret >= 0 && cmd == BREADOFFSET) {
+            if (copy_to_user(rwoffset_request.data, kernbuf, ret))
+                ret = -EFAULT;
+        }
+        if (ret >= 0)
+            f->f_pos = rwoffset_request.offset + ret;
+        vfree(kernbuf);
+        return ret;
+    }
 
-        default:
-            printk("Error: incorrect operation requested, returning.\n");
-            return -EINVAL;
+    default:
+        return -EINVAL;
     }
 }
 
-static int kmod_open(struct inode* inode, struct file* file) {
-    printk("Opened kmod.\n");
+static int kmod_open(struct inode *inode, struct file *file)
+{
     return 0;
 }
 
-static int kmod_release(struct inode* inode, struct file* file) {
-    printk("Closed kmod.\n");
+static int kmod_release(struct inode *inode, struct file *file)
+{
     return 0;
 }
 
-static struct file_operations fops = {
+static const struct file_operations fops = {
     .owner          = THIS_MODULE,
     .open           = kmod_open,
     .release        = kmod_release,
     .unlocked_ioctl = kmod_ioctl,
 };
 
-bool kmod_ioctl_init(void) {
-    if (alloc_chrdev_region(&dev, 0, 1, "usbaccess") < 0)
+bool kmod_ioctl_init(void)
+{
+    if (alloc_chrdev_region(&dev, 0, 1, "usbaccess"))
         return false;
     cdev_init(&kmod_cdev, &fops);
-    if (cdev_add(&kmod_cdev, dev, 1) < 0) {
-        unregister_chrdev_region(dev,1);
+    if (cdev_add(&kmod_cdev, dev, 1)) {
+        unregister_chrdev_region(dev, 1);
         return false;
     }
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(6,2,16)
@@ -176,21 +175,22 @@ bool kmod_ioctl_init(void) {
 #endif
     if (IS_ERR(kmod_class)) {
         cdev_del(&kmod_cdev);
-        unregister_chrdev_region(dev,1);
+        unregister_chrdev_region(dev, 1);
         return false;
     }
-    if (device_create(kmod_class, NULL, dev, NULL, "kmod") == NULL) {
+    if (!device_create(kmod_class, NULL, dev, NULL, "kmod")) {
         class_destroy(kmod_class);
         cdev_del(&kmod_cdev);
-        unregister_chrdev_region(dev,1);
+        unregister_chrdev_region(dev, 1);
         return false;
     }
     return true;
 }
 
-void kmod_ioctl_teardown(void) {
+void kmod_ioctl_teardown(void)
+{
     device_destroy(kmod_class, dev);
     class_destroy(kmod_class);
     cdev_del(&kmod_cdev);
-    unregister_chrdev_region(dev,1);
+    unregister_chrdev_region(dev, 1);
 }
